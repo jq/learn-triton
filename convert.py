@@ -62,10 +62,10 @@ def compare():
     print("Output (Torch):", output_torch)
     output_triton = e4m3_to_bf16_triton(fp8, e4m3_to_bf16_tensor)
     print("Output (Triton):", output_triton)
-    # max_diff = torch.max(torch.abs(output_torch - output_triton)).item()
-    # print(f'The maximum difference between torch and triton is {max_diff}')
+    max_diff = torch.max(torch.abs(output_torch - output_triton)).item()
+    print(f'The maximum difference between torch and triton is {max_diff}')
 
-    # assert torch.allclose(output_torch, output_triton, atol=1e-3), "Outputs do not match!"
+    assert torch.allclose(output_torch, output_triton, atol=1e-3), "Outputs do not match!"
 
 compare()
 
@@ -98,3 +98,5 @@ def benchmark(size, provider):
 
     gbps = lambda ms: size * fp8.element_size() * 2 * 1e-9 / (ms * 1e-3)  # Assuming read and write
     return gbps(ms), gbps(max_ms), gbps(min_ms)
+
+benchmark.run(print_data=True, show_plots=True)
