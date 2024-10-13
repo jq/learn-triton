@@ -28,10 +28,9 @@ def e4m3_to_bf16_triton_kernel(
     block_start = pid * BLOCK_SIZE
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
     mask = offsets < n_elements
-
     fp8_indices = tl.load(fp8_ptr + offsets, mask=mask, other=0).to(tl.int32)
+    # 在 Triton 无法直接对加载到寄存器中的缓存进行动态索引，所以只能从HBM加载
     bf16 = tl.load(lookup_ptr + fp8_indices, mask=mask, other=0.0)
-
     tl.store(out_ptr + offsets, bf16, mask=mask)
 
 def e4m3_to_bf16_triton(
