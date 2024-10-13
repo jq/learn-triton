@@ -1,6 +1,10 @@
+from typing import Optional
+
 import torch
 import triton
 import triton.language as tl
+from torch import Tensor
+
 
 @triton.jit
 def fused_optimized_kernel(
@@ -16,17 +20,18 @@ def fused_optimized_kernel(
 
     t_sign = tl.where(t >= 0, 1, -1).to(tl.int16)
     t_abs = tl.abs(t)
-    t_uint16 = tl.cast(t, tl.uint16, bitcast=True)
-
+    t_int16 = tl.cast(t, tl.int16, bitcast=True)
+    #torch.where(t_sign < 0, t_int16.int() + 32768, t_int16.int())
+    uint16_t = tl.where(t_sign < 0, t_int16 + 32768, t_int16)
     # bf_bound_ptr 和 fp_bound_ptr  [bf_size * 2]  [fp_size * 2]
     # lower = bf_bound[uint16_t, 0]
-    bf_lower = tl.load(bf_bound_ptr + t_uint16 * 2, mask=mask, other=0.0)
+    bf_lower = tl.load(bf_bound_ptr + uint16_t * 2, mask=mask, other=0.0)
     # dist = bf_bound[uint16_t, 1]
-    bf_dist = tl.load(bf_bound_ptr + t_uint16 * 2 + 1, mask=mask, other=0.0)
+    bf_dist = tl.load(bf_bound_ptr + uint16_t * 2 + 1, mask=mask, other=0.0)
     # lower_v = fp_bound[uint16_t, 0]
-    fp_lower_v = tl.load(fp_bound_ptr + t_uint16 * 2, mask=mask, other=0.0)
+    fp_lower_v = tl.load(fp_bound_ptr + uint16_t * 2, mask=mask, other=0.0)
     # upper_v = fp_bound[uint16_t, 1]
-    fp_upper_v = tl.load(fp_bound_ptr + t_uint16 * 2 + 1, mask=mask, other=0.0)
+    fp_upper_v = tl.load(fp_bound_ptr + uint16_t * 2 + 1, mask=mask, other=0.0)
 
     rand = tl.rand(seed, offsets)
 
@@ -69,7 +74,41 @@ def sround_to_fp8_triton(
 
     return out
 
-if __name__ == "__main__":
+def sround_to_fp8(t: Tensor, bfbound: Tensor, fpbound: Tensor, out: Optional[torch.Tensor] = None) -> Tensor:
+    randt = torch.rand(t.shape,  device='cuda', dtype=torch.float32)
+    return _sround_to_fp8(t, randt, bfbound, fpbound, out)
+def _sround_to_fp8(
+        t: Tensor, randt: Tensor, bf_bound: Tensor, fp_bound: Tensor, out: Optional[torch.Tensor] = None,) -> Tensor:
+    t_int16 = t.view(torch.int16)
+    t_sign = torch.sign(t_int16)
+    uint16_t = int16_to_uint16(t_int16, t_sign)
+    lower = bf_bound[uint16_t, 0]
+    dist = bf_bound[uint16_t, 1]
+    lower_v = fp_bound[uint16_t, 0]
+    upper_v = fp_bound[uint16_t, 1]
+    t = torch.abs(t)
+    t = stochastic_rounding(t, randt, lower, dist, lower_v, upper_v, out)
+    # can't be t.view(torch.uint8) because neg also map to positive
+    # and we need t_sign to recover it
+    return int8_to_uint8(t, t_sign, out)
+
+def int16_to_uint16(t_int16: Tensor, t_sign: Tensor) -> Tensor:
+    return torch.where(t_sign < 0, t_int16.int() + 32768, t_int16.int())
+
+def stochastic_rounding(
+        t: Tensor, randt: Tensor, lower: Tensor, dist: Tensor,
+        lower_v: Tensor, upper_v: Tensor, out: Optional[torch.Tensor] = None) -> Tensor:
+    fractional_part = (t - lower) / dist
+    if out is None:
+        return torch.where(fractional_part>= randt, upper_v, lower_v)
+    return torch.where(fractional_part>= randt, upper_v, lower_v, out=out)
+
+def int8_to_uint8(t: Tensor, t_sign: Tensor, out: Optional[torch.Tensor] = None) -> Tensor:
+    if out is None:
+        return torch.where(t_sign < 0, t + 128, t)
+    return torch.where(t_sign < 0, t + 128, t, out=out)
+
+def compare():
     N = 10
     t = torch.randn(N, device='cuda', dtype=torch.bfloat16)
 
@@ -77,5 +116,46 @@ if __name__ == "__main__":
     fp_bound = torch.load("data/e5m2_fp8_bound.pt", weights_only=True).to('cuda')
 
     fp8_tensor = sround_to_fp8_triton(t, bf_bound, fp_bound)
-
     print(fp8_tensor)
+
+    fp8_torch = sround_to_fp8(t, bf_bound, fp_bound)
+    print(fp8_torch)
+    # may not be the same since torch.rand and triton.rand are different
+    #assert torch.allclose(fp8_tensor, fp8_torch, atol=1e-3), "Outputs do not match!"
+
+@triton.testing.perf_report(
+    triton.testing.Benchmark(
+        x_names=['size'],  # Argument names to use as an x-axis for the plot.
+        x_vals=[2**i for i in range(12, 28, 1)],  # Different possible values for `x_name`.
+        x_log=True,  # x axis is logarithmic.
+        line_arg='provider',  # Argument name whose value corresponds to a different line in the plot.
+        line_vals=['triton', 'torch'],  # Possible values for `line_arg`.
+        line_names=['Triton', 'Torch'],  # Label name for the lines.
+        styles=[('blue', '-'), ('green', '-')],  # Line styles.
+        ylabel='GB/s',  # Label name for the y-axis.
+        plot_name='e4m3_to_bf16-performance',  # Name for the plot. Used also as a file name for saving the plot.
+        args={},  # Values for function arguments not in `x_names` and `y_name`.
+    ))
+def benchmark(size, provider):
+    t = torch.randn(size, device='cuda', dtype=torch.bfloat16)
+
+    bf_bound = torch.load("data/e5m2_bf_bound.pt", weights_only=True).to('cuda')
+    fp_bound = torch.load("data/e5m2_fp8_bound.pt", weights_only=True).to('cuda')
+    quantiles = [0.5, 0.2, 0.8]
+
+    if provider == 'torch':
+        func = lambda: sround_to_fp8(t, bf_bound, fp_bound)
+    elif provider == 'triton':
+        func = lambda: sround_to_fp8_triton(t, bf_bound, fp_bound)
+    else:
+        raise ValueError(f"Unknown provider: {provider}")
+
+    ms, min_ms, max_ms = triton.testing.do_bench(func, quantiles=quantiles)
+
+    gbps = lambda ms: size * t.element_size() * 2 * 1e-9 / (ms * 1e-3)  # Assuming read and write
+    return gbps(ms), gbps(max_ms), gbps(min_ms)
+
+if __name__ == "__main__":
+    # compare()
+    benchmark.run(print_data=True, show_plots=True)
+
