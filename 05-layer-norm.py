@@ -1,4 +1,4 @@
-"""
+""" https://chatgpt.com/c/670be674-c78c-800c-a0bc-adcdda5adb0a
 Layer Normalization
 ====================
 In this tutorial, you will write a high-performance layer normalization

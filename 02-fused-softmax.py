@@ -78,20 +78,21 @@ def naive_softmax(x):
 # power-of-two number of elements, so we need to internally "pad" each row and guard the
 # memory operations properly if we want to handle any possible input shapes:
 
-
+# https://chatgpt.com/c/67094772-a914-800c-b2d6-b6c87e98a06c?model=gpt-4o-canmore
 @triton.jit
 def softmax_kernel(output_ptr, input_ptr, input_row_stride, output_row_stride, n_rows, n_cols, BLOCK_SIZE: tl.constexpr,
                    num_stages: tl.constexpr):
     # starting row of the program
     row_start = tl.program_id(0)
     row_step = tl.num_programs(0)
+    # num_stages 代表着在运行时，我们希望有多少个循环阶段被并行执行 由triton 编译优化
     for row_idx in tl.range(row_start, n_rows, row_step, num_stages=num_stages):
         # The stride represents how much we need to increase the pointer to advance 1 row
         row_start_ptr = input_ptr + row_idx * input_row_stride
         # The block size is the next power of two greater than n_cols, so we can fit each
         # row in a single block
         col_offsets = tl.arange(0, BLOCK_SIZE)
-        input_ptrs = row_start_ptr + col_offsets
+        input_ptrs = row_start_ptr + col_offsets # col_offsets（向量）所以input_ptrs 也是向量
         # Load the row into SRAM, using a mask since BLOCK_SIZE may be > than n_cols
         mask = col_offsets < n_cols
         row = tl.load(input_ptrs, mask=mask, other=-float('inf'))
@@ -130,10 +131,10 @@ def softmax(x):
     # increasing the number of warps (`num_warps`) over which each row is distributed.
     # You will see in the next tutorial how to auto-tune this value in a more natural
     # way so you don't have to come up with manual heuristics yourself.
-    num_warps = 8
+    num_warps = 8 # 通常一个 warp 包含 32 个线程。增加 num_warps 可以让每一行被更多线程并行处理。
 
     # Number of software piepling stages.
-    num_stages = 4 if SIZE_SMEM > 200000 else 2
+    num_stages = 4 if SIZE_SMEM > 200000 else 2 # SIZE_SMEM GPU SRAM cache
 
     # Allocate output
     y = torch.empty_like(x)

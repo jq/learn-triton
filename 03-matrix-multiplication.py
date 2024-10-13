@@ -1,4 +1,4 @@
-"""
+"""https://isamu-website.medium.com/understanding-the-triton-tutorials-part-1-6191b59ba4c
 Matrix Multiplication
 =====================
 In this tutorial, you will write a very short high-performance FP16 matrix multiplication kernel that achieves
@@ -67,7 +67,9 @@ You will specifically learn about:
 #
 #    &A[m : m+BLOCK_SIZE_M, k:k+BLOCK_SIZE_K] =  a_ptr + (m : m+BLOCK_SIZE_M)[:, None]*A.stride(0) + (k : k+BLOCK_SIZE_K)[None, :]*A.stride(1);
 #    &B[k : k+BLOCK_SIZE_K, n:n+BLOCK_SIZE_N] =  b_ptr + (k : k+BLOCK_SIZE_K)[:, None]*B.stride(0) + (n : n+BLOCK_SIZE_N)[None, :]*B.stride(1);
-#
+#TODO [:, None] 的作用是将 m : m+BLOCK_SIZE_M 这个范围的索引从原来的一维数组（形状为 (BLOCK_SIZE_M,)）扩展为二维数组（形状为 (BLOCK_SIZE_M, 1)）
+# 配合 [None, :]，将 k : k+BLOCK_SIZE_K 这个范围的索引从原来的一维数组（形状为 (BLOCK_SIZE_K,)）扩展为二维数组（形状为 (1, BLOCK_SIZE_K)）
+# 这样两个二维数组相加，就得到了一个二维数组，形状为 (BLOCK_SIZE_M, BLOCK_SIZE_K)，里面的每个元素都是一个指针，指向 A 的一个元素
 # Which means that pointers for blocks of A and B can be initialized (i.e., :code:`k=0`) in Triton as the following
 # code. Also note that we need an extra modulo to handle the case where :code:`M` is not a multiple of
 # :code:`BLOCK_SIZE_M` or :code:`N` is not a multiple of :code:`BLOCK_SIZE_N`, in which case we can pad the data with
@@ -106,13 +108,15 @@ You will specifically learn about:
 #    pid_m = pid // grid_n
 #    pid_n = pid % grid_n
 #
-# is just not going to cut it.
-#
+# is just not going to cut it. TODO 简单的行优先顺序可能不足以满足缓存命中率的要求，其实就是不是每次计算一行，能避免load 整个B
+# 行优先遍历中，当处理每一行的块时，矩阵 B 中相同的列块可能会被多次加载。
 # One possible solution is to launch blocks in an order that promotes data reuse.
 # This can be done by 'super-grouping' blocks in groups of :code:`GROUP_M` rows before
 # switching to the next column:
-#
-#  .. code-block:: python
+# super-grouping' blocks，
+# 每组包含 GROUP_SIZE_M 行。
+# 在每一组内，计算的顺序是**列优先（column-major）**的#
+# .. code-block:: python
 #
 #    # Program ID
 #    pid = tl.program_id(axis=0)
@@ -262,14 +266,20 @@ def matmul_kernel(
     # Map program ids `pid` to the block of C it should compute.
     # This is done in a grouped ordering to promote L2 data reuse.
     # See above `L2 Cache Optimizations` section for details.
-    pid = tl.program_id(axis=0)
-    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    # pid 的范围是从 0 到 grid[0] - 1。grid[0] 是 num_pid_m * num_pid_n
+    pid = tl.program_id(axis=0) # 表示该实例负责计算矩阵的哪个部分
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M) # 行实例的数量
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N) # 列实例的数量 B 的列数 N 分成 BLOCK_SIZE_N 个块，每块有num_pid_n个列
+    # GROUP_SIZE_M：表示每个组内包含的行pid数量
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n # num_pid_in_group个pid 为一组
     group_id = pid // num_pid_in_group
     first_pid_m = group_id * GROUP_SIZE_M
-    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M) # 实际每个组包括的行pid数量
+    # pid_m 是 pid 需要处理的行， pid_n 是 pid 需要处理的列
+    # (pid % num_pid_in_group) 是实例在组内的编号 这是行列混合的编号,
+    # group_size_m 是组内实例的数量， 混合 % 行的数量，= 实际的行编号
     pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
+    # 混合 // 行的数量 = 实际的列编号
     pid_n = (pid % num_pid_in_group) // group_size_m
 
     # ----------------------------------------------------------
