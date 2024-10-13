@@ -16,19 +16,17 @@ def fused_optimized_kernel(
 
     t_sign = tl.where(t >= 0, 1, -1).to(tl.int16)
     t_abs = tl.abs(t)
-    t_int16 = tl.view(t, tl.int16)
-
-    uint16_t = tl.where(t_sign < 0, t_int16 + 32768, t_int16)
+    t_uint16 = tl.cast(t, tl.uint16, bitcast=True)
 
     # bf_bound_ptr 和 fp_bound_ptr  [bf_size * 2]  [fp_size * 2]
     # lower = bf_bound[uint16_t, 0]
-    bf_lower = tl.load(bf_bound_ptr + uint16_t * 2, mask=mask, other=0.0)
+    bf_lower = tl.load(bf_bound_ptr + t_uint16 * 2, mask=mask, other=0.0)
     # dist = bf_bound[uint16_t, 1]
-    bf_dist = tl.load(bf_bound_ptr + uint16_t * 2 + 1, mask=mask, other=0.0)
+    bf_dist = tl.load(bf_bound_ptr + t_uint16 * 2 + 1, mask=mask, other=0.0)
     # lower_v = fp_bound[uint16_t, 0]
-    fp_lower_v = tl.load(fp_bound_ptr + uint16_t * 2, mask=mask, other=0.0)
+    fp_lower_v = tl.load(fp_bound_ptr + t_uint16 * 2, mask=mask, other=0.0)
     # upper_v = fp_bound[uint16_t, 1]
-    fp_upper_v = tl.load(fp_bound_ptr + uint16_t * 2 + 1, mask=mask, other=0.0)
+    fp_upper_v = tl.load(fp_bound_ptr + t_uint16 * 2 + 1, mask=mask, other=0.0)
 
     rand = tl.rand(seed, offsets)
 
