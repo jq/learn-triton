@@ -18,28 +18,31 @@ def fused_optimized_kernel(
 
     t = tl.load(t_ptr + offsets, mask=mask, other=0.0)
 
-    t_sign = tl.where(t >= 0, 1, -1).to(tl.int16)
     t_abs = tl.abs(t)
     t_int16 = tl.cast(t, tl.int16, bitcast=True)
+    pos_int16_t = t_int16 & 0x7FFF
+
     #torch.where(t_sign < 0, t_int16.int() + 32768, t_int16.int())
-    uint16_t = tl.where(t_sign < 0, t_int16 + 32768, t_int16)
     # bf_bound_ptr 和 fp_bound_ptr  [bf_size * 2]  [fp_size * 2]
     # lower = bf_bound[uint16_t, 0]
-    bf_lower = tl.load(bf_bound_ptr + uint16_t * 2, mask=mask, other=0.0)
+    bf_lower = tl.load(bf_bound_ptr + pos_int16_t * 2, mask=mask, other=0.0)
     # dist = bf_bound[uint16_t, 1]
-    bf_dist = tl.load(bf_bound_ptr + uint16_t * 2 + 1, mask=mask, other=0.0)
+    bf_dist = tl.load(bf_bound_ptr + pos_int16_t * 2 + 1, mask=mask, other=0.0)
     # lower_v = fp_bound[uint16_t, 0]
-    fp_lower_v = tl.load(fp_bound_ptr + uint16_t * 2, mask=mask, other=0.0)
+    fp_lower_v = tl.load(fp_bound_ptr + pos_int16_t * 2, mask=mask, other=0.0)
     # upper_v = fp_bound[uint16_t, 1]
-    fp_upper_v = tl.load(fp_bound_ptr + uint16_t * 2 + 1, mask=mask, other=0.0)
+    fp_upper_v = tl.load(fp_bound_ptr + pos_int16_t * 2 + 1, mask=mask, other=0.0)
+
 
     rand = tl.rand(seed, offsets)
 
     fractional_part = (t_abs - bf_lower) / bf_dist
     rounded = tl.where(fractional_part >= rand, fp_upper_v, fp_lower_v)
 
-    final_result = tl.where(t_sign < 0, rounded + 128, rounded)
-
+    # final_result = (t_int16 & 0x8000) + rounded
+    t_sign = (t_int16 >> 15) & 1
+    # final_result = tl.where(t_sign == 1, rounded + 128, rounded)
+    final_result = (t_sign << 7) | rounded
     tl.store(out_ptr + offsets, final_result, mask=mask)
 
 def sround_to_fp8_triton(
@@ -49,9 +52,9 @@ def sround_to_fp8_triton(
         out: torch.Tensor = None,
         seed: int = 12345
 ) -> torch.Tensor:
-    assert bf_bound.dim() == 2 and bf_bound.size(1) == 2, "bf_bound 应该是 [N, 2] 的张量"
-    assert fp_bound.dim() == 2 and fp_bound.size(1) == 2, "fp_bound 应该是 [N, 2] 的张量"
-    assert t.device.type == 'cuda', "输入张量必须在 CUDA 设备上"
+    assert bf_bound.dim() == 2 and bf_bound.size(1) == 2
+    assert fp_bound.dim() == 2 and fp_bound.size(1) == 2
+    assert t.device.type == 'cuda'
 
     n_elements = t.numel()
     if out is None:
@@ -69,19 +72,16 @@ def sround_to_fp8_triton(
         out,
         n_elements,
         seed,
-        BLOCK_SIZE=1024,
+        BLOCK_SIZE=2048,
     )
 
     return out
 
-def sround_to_fp8(t: Tensor, bfbound: Tensor, fpbound: Tensor, out: Optional[torch.Tensor] = None) -> Tensor:
+def sround_to_fp8(t: Tensor, bf_bound: Tensor, fp_bound: Tensor, out: Optional[torch.Tensor] = None) -> Tensor:
     randt = torch.rand(t.shape,  device='cuda', dtype=torch.float32)
-    return _sround_to_fp8(t, randt, bfbound, fpbound, out)
-def _sround_to_fp8(
-        t: Tensor, randt: Tensor, bf_bound: Tensor, fp_bound: Tensor, out: Optional[torch.Tensor] = None,) -> Tensor:
     t_int16 = t.view(torch.int16)
     t_sign = torch.sign(t_int16)
-    uint16_t = int16_to_uint16(t_int16, t_sign)
+    uint16_t = torch.where(t_sign < 0, t_int16.int() + 32768, t_int16.int())
     lower = bf_bound[uint16_t, 0]
     dist = bf_bound[uint16_t, 1]
     lower_v = fp_bound[uint16_t, 0]
@@ -109,9 +109,12 @@ def int8_to_uint8(t: Tensor, t_sign: Tensor, out: Optional[torch.Tensor] = None)
     return torch.where(t_sign < 0, t + 128, t, out=out)
 
 def compare():
-    N = 10
-    t = torch.randn(N, device='cuda', dtype=torch.bfloat16)
-
+    # N = 10
+    # t = torch.randn(N, device='cuda', dtype=torch.bfloat16)
+    # print(t)
+    # tensor([-0.7109,  0.3672,  0.1953, -0.2051,  0.6250,  1.1562, -1.3750,  0.9805,
+    #         -0.1104, -0.7812], device='cuda:0', dtype=torch.bfloat16)
+    t = torch.tensor([-0.7109], device='cuda', dtype=torch.bfloat16) # 186
     bf_bound = torch.load("data/e5m2_bf_bound.pt", weights_only=True).to('cuda')
     fp_bound = torch.load("data/e5m2_fp8_bound.pt", weights_only=True).to('cuda')
 

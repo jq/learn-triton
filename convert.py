@@ -6,6 +6,7 @@ from typing import Optional
 import os
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
+@torch.jit.script
 def e4m3_to_bf16_torch(
         fp8_tensor: torch.Tensor, lookup_table: torch.Tensor, out: Optional[torch.Tensor] = None) -> torch.Tensor:
 
@@ -43,7 +44,7 @@ def e4m3_to_bf16_triton(
         out = torch.empty_like(fp8_tensor, dtype=torch.bfloat16)
 
     n_elements = fp8_tensor.numel()
-    BLOCK_SIZE = 1024
+    BLOCK_SIZE = 512
 
     grid = (triton.cdiv(n_elements, BLOCK_SIZE),)
 
