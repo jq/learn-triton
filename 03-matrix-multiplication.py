@@ -152,7 +152,10 @@ You will specifically learn about:
 # %%
 # Final Result
 # ------------
+import os
 
+os.environ['TRITON_PRINT_AUTOTUNING'] = '1'
+# os.environ['TRITON_INTERPRET'] = '1'
 import torch
 
 import triton
