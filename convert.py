@@ -18,6 +18,36 @@ def e4m3_to_bf16_torch(
     return lookup_table[fp8_tensor.int()]
 
 @triton.jit
+def e4m3_to_bf16_triton_kernel_(
+        fp8_ptr,           # Pointer to input fp8 tensor
+        lookup_ptr,        # Pointer to lookup table
+        out_ptr,           # Pointer to output bf16 tensor
+        n_elements,        # Number of elements
+        BLOCK_SIZE: tl.constexpr
+):
+    pid = tl.program_id(0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    fp8_indices = tl.load(fp8_ptr + offsets, mask=mask, other=0).to(tl.int32)
+    lookup_table = tl.load(lookup_ptr + tl.arange(0, 256), dtype=tl.bfloat16)
+    bf16 = tl.int16(0)
+
+    asm_code = """
+    ld.shared.u16 {bf16}, [%lookup_table + %index * 2];
+    """
+    # 这里代码不对，因为需要asm 从reg里面读取数据，并不能直接用名字引用
+    # 然后 lookup_table 作为pointer，能否通过lookup_table 传入？以及数据类型都不知道。
+    bf16 = tl.inline_asm_elementwise(
+        asm_code,
+        args=[bf16, lookup_table, fp8_indices],
+        dtype=(tl.bfloat16, tl.int32, tl.int32),
+        is_pure=True,
+        pack=4
+    )
+    tl.store(out_ptr + offsets, bf16, mask=mask)
+
+@triton.jit
 def e4m3_to_bf16_triton_kernel(
         fp8_ptr,           # Pointer to input fp8 tensor
         lookup_ptr,        # Pointer to lookup table
@@ -30,7 +60,6 @@ def e4m3_to_bf16_triton_kernel(
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
     mask = offsets < n_elements
     fp8_indices = tl.load(fp8_ptr + offsets, mask=mask, other=0).to(tl.int32)
-    # 在 Triton 无法直接对加载到寄存器中的缓存进行动态索引，所以只能从HBM加载
     bf16 = tl.load(lookup_ptr + fp8_indices, mask=mask, other=0.0)
     tl.store(out_ptr + offsets, bf16, mask=mask)
 
@@ -99,4 +128,4 @@ def benchmark(size, provider):
     gbps = lambda ms: size * fp8.element_size() * 2 * 1e-9 / (ms * 1e-3)  # Assuming read and write
     return gbps(ms), gbps(max_ms), gbps(min_ms)
 
-benchmark.run(print_data=True, show_plots=True)
+# benchmark.run(print_data=True, show_plots=True)

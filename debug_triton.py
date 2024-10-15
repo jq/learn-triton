@@ -27,7 +27,7 @@ nsys profile -o profile_report python your_script.py
 计算瓶颈：需要增大 num_warps 来提高并行度。
 num_warps：对于计算密集型内核，尝试设置为 4-8 个 warp，充分利用并行计算资源。
 num_stages：对于内存访问频繁的内核，尝试设置为 2-4 个 stage，隐藏内存延迟。
-
+https://chatgpt.com/c/670d9790-84e0-800c-8e6f-adb3d4e29789  triton 和numpy 异同
 '''
 import os
 
